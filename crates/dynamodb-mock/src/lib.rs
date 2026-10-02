@@ -138,6 +138,12 @@ pub struct Running {
     task: JoinHandle<Result<()>>,
 }
 
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl Running {
     /// The endpoint to configure as `AWS_ENDPOINT_URL_DYNAMODB`.
     pub fn endpoint(&self) -> String {

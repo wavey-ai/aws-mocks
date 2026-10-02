@@ -431,6 +431,12 @@ pub struct RunningQueue {
     task: JoinHandle<Result<()>>,
 }
 
+impl Drop for RunningQueue {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl RunningQueue {
     pub fn address(&self) -> SocketAddr {
         self.address
