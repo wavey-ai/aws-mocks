@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/cognito-mock",
+    "crates/sqs-mock",
+    "crates/transcribe-mock",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wavey-ai/aws-mocks"
+
+# Versions match what downstream lockfiles already resolve, so adding these crates as a
+# git dependency does not move shared dependencies.
+[workspace.dependencies]
+anyhow = "1.0.104"
+base64 = "0.22.1"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "http1", "server"] }
+jsonwebtoken = "9.3.1"
+rand = "0.8.8"
+rsa = { version = "0.9.10", features = ["pem"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.26.1", features = ["v7"] }
+
+# RSA key generation (cognito-mock signs tokens with a fresh key on every start) is slow
+# in unoptimised builds.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

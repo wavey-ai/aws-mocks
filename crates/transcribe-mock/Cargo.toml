@@ -1,0 +1,27 @@
+[package]
+name = "transcribe-mock"
+description = "Loopback deterministic speech fixture standing in for AWS Transcribe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "transcribe_mock"
+path = "src/lib.rs"
+
+[[bin]]
+name = "transcribe-mock"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
