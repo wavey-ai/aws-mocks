@@ -10,14 +10,14 @@ AWS, and none of them check request signatures.
 | Crate | Stands in for | Covers |
 | --- | --- | --- |
 | [`cognito-mock`](#cognito-mock) | Amazon Cognito user pools | AWS JSON admin, sign-in, password-reset, group and token-revocation calls; JWKS; RS256 access/ID tokens; test routes for issuing tokens and injecting faults |
+| [`dynamodb-mock`](#dynamodb-mock) | Amazon DynamoDB | Tables with GSIs/LSIs, item reads and writes with condition and update expressions, `Query`/`Scan` with filters, projections and paging, batches and transactions; in memory |
 | [`sqs-mock`](crates/sqs-mock/README.md) | Amazon SQS standard queues | `GetQueueUrl`, `CreateQueue` (configured names), `SendMessage`, `ReceiveMessage` with long polling, `ChangeMessageVisibility`, `DeleteMessage`, `GetQueueAttributes`, `PurgeQueue`; state persisted on disk |
 | [`transcribe-mock`](crates/transcribe-mock/README.md) | AWS Transcribe (via a loopback HTTP endpoint) | `POST /transcribe` with 16 kHz PCM answers a fixed transcript, or an empty one for silence |
-
-A `dynamodb-mock` crate is planned.
 
 ## Running
 
 ```sh
+cargo run -p dynamodb-mock -- --listen 127.0.0.1:8003
 cargo run -p cognito-mock -- --listen 127.0.0.1:9229 --pool-id us-east-1_local --client-id local-client
 cargo run -p sqs-mock -- --listen 127.0.0.1:8010 --directory .local/sqs --queue jobs
 cargo run -p transcribe-mock -- --listen 127.0.0.1:8005
@@ -35,6 +35,7 @@ Pin a git revision:
 sqs-mock = { git = "https://github.com/wavey-ai/aws-mocks", rev = "<sha>" }
 cognito-mock = { git = "https://github.com/wavey-ai/aws-mocks", rev = "<sha>" }
 transcribe-mock = { git = "https://github.com/wavey-ai/aws-mocks", rev = "<sha>" }
+dynamodb-mock = { git = "https://github.com/wavey-ai/aws-mocks", rev = "<sha>" }
 ```
 
 With a crate in your dependency graph, `cargo build -p cognito-mock --bin cognito-mock`
@@ -102,3 +103,26 @@ cargo test --workspace
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
+
+## dynamodb-mock
+
+Speaks the DynamoDB JSON 1.0 protocol on `POST /` (`X-Amz-Target: DynamoDB_20120810.<Operation>`)
+and keeps everything in memory. Tables: `CreateTable` (GSIs and LSIs with `ALL`, `KEYS_ONLY` or
+`INCLUDE` projections; tables are `ACTIVE` at once), `DescribeTable`, `ListTables`, `DeleteTable`,
+`UpdateTable`, `UpdateTimeToLive`/`DescribeTimeToLive` (stored, never expired), tags. Items:
+`GetItem`, `PutItem`, `DeleteItem`, `UpdateItem` with condition expressions, every `ReturnValues`
+mode and `ReturnValuesOnConditionCheckFailure`; `Query` and `Scan` with key conditions, filters,
+projections, `Select`, `ScanIndexForward`, `Limit`, paging and segments; `BatchGetItem`,
+`BatchWriteItem`, `TransactWriteItems` (all-or-nothing, `CancellationReasons`) and
+`TransactGetItems`. Legacy `KeyConditions`/`QueryFilter`/`ScanFilter`/`Expected`/
+`AttributeUpdates`/`AttributesToGet` parameters are accepted.
+
+Expressions cover nested map and list paths, every comparison, `BETWEEN`, `IN`, `AND`/`OR`/`NOT`,
+`attribute_exists`, `attribute_not_exists`, `attribute_type`, `begins_with`, `contains` and `size`;
+updates cover `SET` (with `+`/`-`, `if_not_exists`, `list_append`), `REMOVE`, `ADD` and `DELETE`.
+Numbers use exact 38-digit decimals. Unused or undefined placeholders are a `ValidationException`,
+as in DynamoDB. Not modelled: streams, PartiQL, backups, throughput limits, the 1 MB page limit and
+the reserved-word check.
+
+`tests/boto3_compat.py` drives a running mock with boto3's resource API
+(`DYNAMODB_ENDPOINT=http://127.0.0.1:8003 python crates/dynamodb-mock/tests/boto3_compat.py`).
