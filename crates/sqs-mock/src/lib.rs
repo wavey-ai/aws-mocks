@@ -1,9 +1,11 @@
-//! Loopback Amazon SQS fixture serving a fixed set of named standard queues.
+//! Loopback Amazon SQS fixture serving named standard queues.
 //!
 //! It speaks the AWS JSON protocol (`X-Amz-Target: AmazonSQS.*`) for `GetQueueUrl`,
 //! `SendMessage`, `ReceiveMessage` (with long polling), `ChangeMessageVisibility` and
-//! `DeleteMessage`, plus `CreateQueue` (of a configured queue), `GetQueueAttributes` and
-//! `PurgeQueue` for inspection. Messages persist in `state.json` under the state directory.
+//! `DeleteMessage`, plus `CreateQueue`, `GetQueueAttributes` and `PurgeQueue` for inspection.
+//! Queues are configured up front or created on demand by `CreateQueue`, which is idempotent
+//! like SQS. Messages, and the queues they belong to, persist in `state.json` under the state
+//! directory.
 //!
 //! The `sqs-mock` binary serves it on a fixed port; tests embed it with [`start`] on an
 //! ephemeral port.
@@ -56,8 +58,9 @@ struct State {
 struct App {
     state: Mutex<State>,
     file: PathBuf,
+    address: SocketAddr,
     /// Queue URL to queue name; the first configured queue's URL is also kept first.
-    queues: Vec<(String, String)>,
+    queues: Mutex<Vec<(String, String)>>,
     notify: Notify,
 }
 
@@ -114,6 +117,8 @@ impl App {
     fn queue(&self, body: &Value) -> Result<String, Box<Reply>> {
         let url = required(body, "QueueUrl")?;
         self.queues
+            .lock()
+            .unwrap()
             .iter()
             .find(|(known, _)| known == url)
             .map(|(_, name)| name.clone())
@@ -125,11 +130,39 @@ impl App {
             })
     }
 
-    fn url_of(&self, name: &str) -> Option<&str> {
+    fn url_of(&self, name: &str) -> Option<String> {
         self.queues
+            .lock()
+            .unwrap()
             .iter()
             .find(|(_, known)| known == name)
-            .map(|(url, _)| url.as_str())
+            .map(|(url, _)| url.clone())
+    }
+
+    /// Queue `name`'s URL, creating the queue if it does not exist yet.
+    fn create(&self, body: &Value) -> Result<Value, Box<Reply>> {
+        let name = required(body, "QueueName")?;
+        if !valid_name(name) {
+            return Err(Box::new(error(
+                "InvalidParameterValue",
+                "Queue names are 1-80 alphanumeric, hyphen or underscore characters",
+            )));
+        }
+        if let Some(url) = self.url_of(name) {
+            return Ok(json!({"QueueUrl": url}));
+        }
+        let url = queue_url(self.address, name);
+        // Persist the empty queue so it survives a restart, as configured queues do.
+        let mut state = self.state.lock().unwrap();
+        state.queues.entry(name.to_owned()).or_default();
+        self.persist(&state)
+            .map_err(|_| Box::new(error("InternalError", "Could not persist queue")))?;
+        let mut queues = self.queues.lock().unwrap();
+        // A concurrent CreateQueue of the same name may have registered it first.
+        if !queues.iter().any(|(_, known)| known == name) {
+            queues.push((url.clone(), name.to_owned()));
+        }
+        Ok(json!({"QueueUrl": url}))
     }
 
     fn send(&self, body: &Value) -> Result<Value, Box<Reply>> {
@@ -278,7 +311,8 @@ async fn handle(app: Arc<App>, request: Request<Incoming>) -> Reply {
         Err(_) => return error("InvalidParameterValue", "Expected JSON request"),
     };
     let result = match action.as_str() {
-        "CreateQueue" | "GetQueueUrl" => {
+        "CreateQueue" => app.create(&body),
+        "GetQueueUrl" => {
             if let Some(url) = required(&body, "QueueName")
                 .ok()
                 .and_then(|name| app.url_of(name))
@@ -337,14 +371,7 @@ where
     let mut names: Vec<String> = Vec::new();
     for name in queues {
         let name = name.into();
-        anyhow::ensure!(
-            !name.is_empty()
-                && name.len() <= 80
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-            "invalid queue name {name:?}"
-        );
+        anyhow::ensure!(valid_name(&name), "invalid queue name {name:?}");
         if !names.contains(&name) {
             names.push(name);
         }
@@ -356,7 +383,16 @@ where
     Ok(names)
 }
 
-fn load(directory: &Path, address: SocketAddr, queues: Vec<String>) -> Result<Arc<App>> {
+/// An SQS standard queue name: 1-80 alphanumeric, hyphen or underscore characters.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 80
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn load(directory: &Path, address: SocketAddr, mut queues: Vec<String>) -> Result<Arc<App>> {
     anyhow::ensure!(
         address.ip().is_loopback(),
         "SQS fixture must listen on loopback"
@@ -375,13 +411,22 @@ fn load(directory: &Path, address: SocketAddr, queues: Vec<String>) -> Result<Ar
         .entry(queues[0].clone())
         .or_default()
         .extend(legacy);
+    // Queues an earlier run created with `CreateQueue` are served again after the configured ones.
+    for name in state.queues.keys() {
+        if valid_name(name) && !queues.contains(name) {
+            queues.push(name.clone());
+        }
+    }
     Ok(Arc::new(App {
         state: Mutex::new(state),
         file,
-        queues: queues
-            .into_iter()
-            .map(|name| (queue_url(address, &name), name))
-            .collect(),
+        address,
+        queues: Mutex::new(
+            queues
+                .into_iter()
+                .map(|name| (queue_url(address, &name), name))
+                .collect(),
+        ),
         notify: Notify::new(),
     }))
 }
@@ -428,6 +473,7 @@ where
 pub struct RunningQueue {
     address: SocketAddr,
     queues: Vec<String>,
+    app: Arc<App>,
     task: JoinHandle<Result<()>>,
 }
 
@@ -452,12 +498,9 @@ impl RunningQueue {
         queue_url(self.address, &self.queues[0])
     }
 
-    /// Queue `name`'s URL, if the fixture serves it.
+    /// Queue `name`'s URL, if the fixture serves it (configured or created with `CreateQueue`).
     pub fn queue_url_of(&self, name: &str) -> Option<String> {
-        self.queues
-            .iter()
-            .any(|queue| queue == name)
-            .then(|| queue_url(self.address, name))
+        self.app.url_of(name)
     }
 
     pub fn stop(self) {
@@ -480,10 +523,11 @@ where
         .context("read queue listener address")?;
     // Load up front so a bad state file fails the caller, not the task.
     let app = load(directory, address, queues.clone())?;
-    let task = tokio::spawn(accept(listener, app));
+    let task = tokio::spawn(accept(listener, Arc::clone(&app)));
     Ok(RunningQueue {
         address,
         queues,
+        app,
         task,
     })
 }

@@ -109,6 +109,61 @@ async fn serves_only_the_configured_queues() {
 }
 
 #[tokio::test]
+async fn create_queue_creates_unknown_queues_and_is_idempotent() {
+    let directory = scratch("create");
+    let queue = sqs_mock::start(&directory, ["first"]).await.unwrap();
+    let address = queue.address();
+    let (status, created) = call(address, "CreateQueue", json!({"QueueName": "made-later"})).await;
+    assert_eq!(status, 200);
+    let url = created["QueueUrl"].as_str().unwrap().to_owned();
+    assert_eq!(url, sqs_mock::queue_url(address, "made-later"));
+    assert_eq!(queue.queue_url_of("made-later"), Some(url.clone()));
+    let (_, again) = call(address, "CreateQueue", json!({"QueueName": "made-later"})).await;
+    assert_eq!(again["QueueUrl"], url);
+    let (_, looked_up) = call(address, "GetQueueUrl", json!({"QueueName": "made-later"})).await;
+    assert_eq!(looked_up["QueueUrl"], url);
+    let (status, _) = call(
+        address,
+        "SendMessage",
+        json!({"QueueUrl": url, "MessageBody": "late"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (_, received) = call(address, "ReceiveMessage", json!({"QueueUrl": url})).await;
+    assert_eq!(received["Messages"][0]["Body"], "late");
+    let (status, invalid) = call(address, "CreateQueue", json!({"QueueName": "no spaces"})).await;
+    assert_eq!(status, 400);
+    assert_eq!(invalid["__type"], "com.amazonaws.sqs#InvalidParameterValue");
+    queue.stop();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn created_queues_survive_a_restart() {
+    let directory = scratch("create-restart");
+    let queue = sqs_mock::start(&directory, ["first"]).await.unwrap();
+    let (status, _) = call(
+        queue.address(),
+        "CreateQueue",
+        json!({"QueueName": "made-later"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    queue.stop();
+    let queue = sqs_mock::start(&directory, ["first"]).await.unwrap();
+    assert!(queue.queue_url_of("made-later").is_some());
+    let (status, _) = call(
+        queue.address(),
+        "GetQueueUrl",
+        json!({"QueueName": "made-later"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    queue.stop();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn single_queue_state_loads_into_the_first_queue() {
     let directory = scratch("legacy");
     std::fs::write(
