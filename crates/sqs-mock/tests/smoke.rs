@@ -197,3 +197,62 @@ async fn rejects_an_empty_queue_list() {
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn a_failed_delete_leaves_the_message_to_be_delivered_again() {
+    let directory = scratch("delete-faults");
+    let queue = sqs_mock::start(&directory, ["jobs"]).await.unwrap();
+    let address = queue.address();
+    let url = queue.queue_url();
+    let (_, sent) = call(
+        address,
+        "SendMessage",
+        json!({"QueueUrl": url, "MessageBody": "once"}),
+    )
+    .await;
+    let id = sent["MessageId"].as_str().unwrap().to_owned();
+
+    queue.fail_next_deletes(1);
+    let (_, first) = call(
+        address,
+        "ReceiveMessage",
+        json!({"QueueUrl": url, "VisibilityTimeout": 1}),
+    )
+    .await;
+    let receipt = first["Messages"][0]["ReceiptHandle"].clone();
+    let (status, _) = call(
+        address,
+        "DeleteMessage",
+        json!({"QueueUrl": url, "ReceiptHandle": receipt}),
+    )
+    .await;
+    assert_eq!(status, 500);
+
+    // Back once its visibility timeout passes, with the receive counted.
+    let (_, again) = call(
+        address,
+        "ReceiveMessage",
+        json!({"QueueUrl": url, "WaitTimeSeconds": 3}),
+    )
+    .await;
+    assert_eq!(again["Messages"][0]["MessageId"], id);
+    assert_eq!(
+        again["Messages"][0]["Attributes"]["ApproximateReceiveCount"],
+        "2"
+    );
+    let (status, _) = call(
+        address,
+        "DeleteMessage",
+        json!({"QueueUrl": url, "ReceiptHandle": again["Messages"][0]["ReceiptHandle"]}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        queue.receives(&id),
+        2,
+        "the receive count survives the delete"
+    );
+    assert_eq!(queue.received().len(), 1);
+    queue.stop();
+    std::fs::remove_dir_all(directory).unwrap();
+}

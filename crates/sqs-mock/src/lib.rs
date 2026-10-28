@@ -62,6 +62,10 @@ struct App {
     /// Queue URL to queue name; the first configured queue's URL is also kept first.
     queues: Mutex<Vec<(String, String)>>,
     notify: Notify,
+    /// Test controls: injected `DeleteMessage` failures still to come.
+    failing_deletes: Mutex<usize>,
+    /// Test observation: how many times each message id has been received, kept after deletion.
+    receives: Mutex<BTreeMap<String, u32>>,
 }
 
 type Reply = Response<Full<Bytes>>;
@@ -215,6 +219,10 @@ impl App {
                     message.receipt = Some(receipt.clone());
                     message.receives += 1;
                     message.visible_ms = now + visibility * 1000;
+                    self.receives
+                        .lock()
+                        .unwrap()
+                        .insert(message.id.clone(), message.receives);
                     delivered.push(json!({
                         "MessageId": message.id,
                         "ReceiptHandle": receipt,
@@ -244,6 +252,21 @@ impl App {
     fn delete(&self, body: &Value) -> Result<Value, Box<Reply>> {
         let queue = self.queue(body)?;
         let receipt = required(body, "ReceiptHandle")?;
+        {
+            // An injected failure leaves the message in flight, so it is delivered again once its
+            // visibility timeout passes: what SQS does when a consumer's delete is lost.
+            let mut failing = self.failing_deletes.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                return Err(Box::new(reply(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({
+                        "__type": "com.amazonaws.sqs#InternalError",
+                        "message": "injected DeleteMessage failure",
+                    }),
+                )));
+            }
+        }
         let mut state = self.state.lock().unwrap();
         let messages = state.queues.entry(queue).or_default();
         let Some(index) = messages
@@ -428,6 +451,8 @@ fn load(directory: &Path, address: SocketAddr, mut queues: Vec<String>) -> Resul
                 .collect(),
         ),
         notify: Notify::new(),
+        failing_deletes: Mutex::new(0),
+        receives: Mutex::new(BTreeMap::new()),
     }))
 }
 
@@ -501,6 +526,29 @@ impl RunningQueue {
     /// Queue `name`'s URL, if the fixture serves it (configured or created with `CreateQueue`).
     pub fn queue_url_of(&self, name: &str) -> Option<String> {
         self.app.url_of(name)
+    }
+
+    /// Fails the next `count` `DeleteMessage` calls with a 500, deleting nothing, so each of those
+    /// messages is delivered again after its visibility timeout.
+    pub fn fail_next_deletes(&self, count: usize) {
+        *self.app.failing_deletes.lock().unwrap() = count;
+    }
+
+    /// How many times the message with `message_id` has been received (0 if never), including
+    /// after it was deleted.
+    pub fn receives(&self, message_id: &str) -> u32 {
+        self.app
+            .receives
+            .lock()
+            .unwrap()
+            .get(message_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Every message id received so far, with its receive count.
+    pub fn received(&self) -> BTreeMap<String, u32> {
+        self.app.receives.lock().unwrap().clone()
     }
 
     pub fn stop(self) {
