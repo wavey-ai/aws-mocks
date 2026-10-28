@@ -14,3 +14,13 @@ Queue URLs are `http://<listen>/000000000000/<name>`; `--queue` defaults to `loc
 `CreateQueue` creates a queue that does not exist yet and returns its URL; calling it again
 returns the same URL, as SQS does. Created queues persist in `state.json` and are served again
 after a restart. `GetQueueUrl` still answers `NonExistentQueue` for a name never created.
+
+## Test controls
+
+An embedded fixture ([`start`]) exposes controls for failure tests:
+
+- `fail_next_deletes(count)`: the next `count` `DeleteMessage` calls answer 500 and delete
+  nothing, so each message is delivered again after its visibility timeout, as when a consumer's
+  delete is lost.
+- `receives(message_id)` / `received()`: how many times a message was received, kept after it is
+  deleted, so a test can prove a redelivery happened.
